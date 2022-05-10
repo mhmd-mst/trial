@@ -15,22 +15,24 @@ from semseg.utils.utils import setup_cudnn
 
 
 @torch.no_grad()
-def evaluate(model, dataloader, device):
+def evaluate(model, dataloader, device, loss_fn):
     print('Evaluating...')
     model.eval()
     metrics = Metrics(dataloader.dataset.n_classes, dataloader.dataset.ignore_label, device)
-
+    test_loss = 0
     for images, labels in tqdm(dataloader):
         images = images.to(device)
         labels = labels.to(device)
         preds = model(images).softmax(dim=1)
+        loss = loss_fn(preds, labels)
+        test_loss += loss.item()
         metrics.update(preds, labels)
-    
+
     ious, miou = metrics.compute_iou()
     acc, macc = metrics.compute_pixel_acc()
     f1, mf1 = metrics.compute_f1()
-    
-    return acc, macc, f1, mf1, ious, miou
+
+    return acc, macc, f1, mf1, ious, loss, miou
 
 
 @torch.no_grad()

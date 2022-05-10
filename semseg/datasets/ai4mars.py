@@ -24,12 +24,13 @@ class ai4mars(Dataset):
     CLASSES = [
         'soil', 'bedrock', 'sand', 'bigrock'
     ]
+    PALETTE = torch.tensor([
+        [120, 120, 120], [180, 120, 120], [6, 230, 230], [80, 50, 50]])
 
-    def __init__(self, path: str, split: str = 'train', scale: tuple = (512, 512), transform=None) -> None:
+    def __init__(self, path, split='train', scale=(512, 512)):
         super().__init__()
         assert split in ['train', 'val']
-        self.split = 'training' if split == 'train' else 'validation'
-        self.transform = transform
+        self.split = split
         self.n_classes = len(self.CLASSES)
         self.ignore_label = 255
 
@@ -47,9 +48,9 @@ class ai4mars(Dataset):
         self.name_intersection = sorted(list(set(image_name) & set(label_name)))
         self.image_path = [os.path.join(image_path, image + ".JPG") for image in self.name_intersection]
         if split == 'train':
-          self.label_path = [os.path.join(label_path, label + ".png") for label in self.name_intersection]
+            self.label_path = [os.path.join(label_path, label + ".png") for label in self.name_intersection]
         else:
-          self.label_path = [os.path.join(label_path, label + "_merged.png") for label in self.name_intersection]
+            self.label_path = [os.path.join(label_path, label + "_merged.png") for label in self.name_intersection]
 
         self.to_tensor = transforms.Compose([
             transforms.ToTensor(),
@@ -62,17 +63,12 @@ class ai4mars(Dataset):
     def __getitem__(self, index: int) -> Tuple[Tensor, Tensor]:
         image = Image.open(self.image_path[index]).convert("RGB")
         label = Image.open(self.label_path[index])
-        if self.split == 'training':
+        if self.split == 'train':
             image, label = augmentation(image, label)
-        image = transforms.Resize(self.image_size, Image.BILINEAR)(image)
-        label = transforms.Resize(self.image_size, Image.NEAREST)(label)
+            image = transforms.Resize(self.image_size, transforms.InterpolationMode.BILINEAR)(image)
+            label = transforms.Resize(self.image_size, transforms.InterpolationMode.NEAREST)(label)
         image = self.to_tensor(image)
         label = torch.from_numpy(np.asarray(label, dtype=np.float32))
         return image, label.long()
 
-
-if __name__ == '__main__':
-    from semseg.utils.visualize import visualize_dataset_sample
-
-    visualize_dataset_sample(ai4mars,
-                             '/Users/almou/Desktop/Internship/Dataset/ai4mars-dataset-merged-0.1/ai4mars-dataset-merged-0.1/msl/')
+# if __name__ == '__main__':

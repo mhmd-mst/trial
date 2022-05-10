@@ -1,23 +1,23 @@
 DEVICE          : cuda              # device used for training and evaluation (cpu, cuda, cuda0, cuda1, ...)
-SAVE_DIR        : 'output'         # output folder name used for saving the model, logs and inference results
+SAVE_DIR        : '/content/drive/MyDrive/newwork/sfnetd18/'         # output folder name used for saving the model, logs and inference results
 
 MODEL:
-  NAME          : DDRNet                                          # name of the model you are using
-  BACKBONE      : ddrnet23slim                                                  # model variant
-  PRETRAINED    : 'checkpoints/backbones/ddrnet_23slim.pth'              # backbone model's weight
+  NAME          : SFNet                                          # name of the model you are using
+  BACKBONE      : ResNetD-18                                           # model variant
+  PRETRAINED    : 'checkpoints/backbones/resnetd18.pth'              # model's weights or backbone model's weight
 
 DATASET:
-  NAME          : ai4mars                                              # dataset name to be trained with (camvid, cityscapes, ade20k)
-  ROOT          : 'data/ai4mars/'           # dataset root path
+  NAME          : ai4mars                   # dataset name to be trained with (ai4mars)
+  ROOT          : 'data/msl/'           # dataset root path
   IGNORE_LABEL  : 255
 
 TRAIN:
   IMAGE_SIZE    : [512, 512]      # training image size in (h, w)
-  BATCH_SIZE    : 2              # batch size used to train
+  BATCH_SIZE    : 4              # batch size used to train
   EPOCHS        : 20             # number of epochs to train
   EVAL_INTERVAL : 5              # evaluation interval during training
-  AMP           : false           # use AMP in training
-  DDP           : false           # use DDP training
+  AMP           : true           # use AMP in training
+  RESUME_TRAIN  : false         # Resume training from a checkpoint
 
 LOSS:
   NAME          : CrossEntropy          # loss function name (ohemce, ce, dice)
@@ -36,7 +36,7 @@ SCHEDULER:
 
 
 EVAL:
-  MODEL_PATH    : 'output/ddrnet_ai4mars.pth'    # trained model file path
+  MODEL_PATH    : '/content/drive/MyDrive/newwork/sfnetd18/'    # trained model file path
   IMAGE_SIZE    : [1024,1024]                          # evaluation image size in (h, w)
   MSF:
     ENABLE      : false                               # multi-scale and flip evaluation
@@ -45,7 +45,7 @@ EVAL:
 
 
 TEST:
-  MODEL_PATH    : 'output/ddrnet_ai4mars.pth'    # trained model file path
+  MODEL_PATH    : '/content/drive/MyDrive/newwork/sfnetd18/'    # trained model file path
   FILE          : 'assests/ai4mars'                    # filename or foldername
   IMAGE_SIZE    : [1024,1024]                          # inference image size in (h, w)
   OVERLAY       : true                                # save the overlay result (image_alpha+label_alpha)

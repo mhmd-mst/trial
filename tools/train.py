@@ -9,12 +9,9 @@ from torch.utils.data import DataLoader
 from pathlib import Path
 from torch.utils.tensorboard import SummaryWriter
 from torch.cuda.amp import GradScaler, autocast
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DistributedSampler, RandomSampler
-from torch import distributed as dist
+from torch.utils.data import RandomSampler
 from semseg.models.ddrnet import DDRNet
 from semseg.datasets.ai4mars import ai4mars
-from semseg.augmentations import get_train_augmentation, get_val_augmentation
 from semseg.losses import get_loss
 from semseg.schedulers import get_scheduler
 from semseg.optimizers import get_optimizer
@@ -32,38 +29,63 @@ def main(cfg, gpu, save_dir):
     loss_cfg, optim_cfg, sched_cfg = cfg['LOSS'], cfg['OPTIMIZER'], cfg['SCHEDULER']
     epochs, lr = train_cfg['EPOCHS'], optim_cfg['LR']
 
-    # traintransform = get_train_augmentation(train_cfg['IMAGE_SIZE'], seg_fill=dataset_cfg['IGNORE_LABEL'])
-    # valtransform = get_val_augmentation(eval_cfg['IMAGE_SIZE'])
-
     trainset = eval(dataset_cfg['NAME'])(dataset_cfg['ROOT'], 'train')
     valset = eval(dataset_cfg['NAME'])(dataset_cfg['ROOT'], 'val')
-
+    # data_sampler = RandomSampler(trainset, num_samples=len(valset))
     model = eval(model_cfg['NAME'])(model_cfg['BACKBONE'], trainset.n_classes)
-    model.init_pretrained(model_cfg['PRETRAINED'])
-    model = model.to(device)
-
-    if train_cfg['DDP']:
-        sampler = DistributedSampler(trainset, dist.get_world_size(), dist.get_rank(), shuffle=True)
-        model = DDP(model, device_ids=[gpu])
-    else:
-        sampler = RandomSampler(trainset)
-
-    trainloader = DataLoader(trainset, batch_size=train_cfg['BATCH_SIZE'], num_workers=num_workers, drop_last=True,
-                             pin_memory=True, sampler=sampler)
-    valloader = DataLoader(valset, batch_size=1, num_workers=1, pin_memory=True)
-
+    print(
+        f"The number of parameters of {model_cfg['NAME']} is: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+    print("")
     iters_per_epoch = len(trainset) // train_cfg['BATCH_SIZE']
     # class_weights = trainset.class_weights.to(device)
     loss_fn = get_loss(loss_cfg['NAME'], trainset.ignore_label, None)
     optimizer = get_optimizer(model, optim_cfg['NAME'], lr, optim_cfg['WEIGHT_DECAY'])
+
     scheduler = get_scheduler(sched_cfg['NAME'], optimizer, epochs * iters_per_epoch, sched_cfg['POWER'],
                               iters_per_epoch * sched_cfg['WARMUP'], sched_cfg['WARMUP_RATIO'])
+
+    if train_cfg['RESUME_TRAIN']:
+        checkpoint = torch.load(model_cfg['PRETRAINED'])
+        model.load_state_dict(checkpoint['model'])
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        scheduler.load_state_dict(checkpoint['scheduler'])
+        start_epoch = checkpoint['epoch']
+    else:
+        model.init_pretrained(model_cfg['PRETRAINED'])
+        start_epoch = 0
+    model = model.to(device)
+
+    trainloader = DataLoader(trainset, batch_size=train_cfg['BATCH_SIZE'], num_workers=num_workers, pin_memory=True)
+    valloader = DataLoader(valset, batch_size=1, num_workers=1, pin_memory=True)
+    # trainsubsetloader = DataLoader(trainset, batch_size=1, num_workers=1, pin_memory=True, sampler=data_sampler)
+
     scaler = GradScaler(enabled=train_cfg['AMP'])
     writer = SummaryWriter(str(save_dir / 'logs'))
 
-    for epoch in range(epochs):
+    for epoch in range(start_epoch, epochs):
+
+        if epoch == 0:
+            results = evaluate(model, valloader, device, loss_fn)
+            acc, macc, test_loss, miou = results[0], results[1], results[-2], results[-1]
+            print(f"Current mIoU: {miou} Best mIoU: {best_mIoU}")
+            print(f"Current accuracy: {acc}")
+            print(f"Current maccuracy: {macc}")
+            print("")
+            writer.add_scalar('Loss/test', test_loss, epoch)
+            writer.add_scalar('mIoU/test', miou, epoch)
+            results = evaluate(model, trainloader, device, loss_fn)
+            acc, macc, miou = results[0], results[1], results[-1]
+            writer.add_scalar('mIoU/train', miou, epoch)
+            print("Evaluating on train")
+            print(f"Current mIoU: {miou}")
+            print(f"Current accuracy: {acc}")
+            print(f"Current maccuracy: {macc}")
+            print(f"Current maccuracy: {macc}")
+            print("")
+            print("="*20)
+            print("")
+
         model.train()
-        if train_cfg['DDP']: sampler.set_epoch(epoch)
 
         train_loss = 0.0
         pbar = tqdm(enumerate(trainloader), total=iters_per_epoch,
@@ -81,8 +103,11 @@ def main(cfg, gpu, save_dir):
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
+            scale = scaler.get_scale()
             scaler.update()
-            scheduler.step()
+            skip_lr_sched = (scale > scaler.get_scale())
+            if not skip_lr_sched:
+                scheduler.step()
             torch.cuda.synchronize()
 
             lr = scheduler.get_lr()
@@ -96,18 +121,37 @@ def main(cfg, gpu, save_dir):
         writer.add_scalar('train/loss', train_loss, epoch)
         torch.cuda.empty_cache()
 
-        if (epoch + 1) % train_cfg['EVAL_INTERVAL'] == 0 or epoch ==0:
-            results = evaluate(model, valloader, device)
-            acc, macc, miou = results[0],results[1],results[-1]
-            writer.add_scalar('val/mIoU', miou, epoch)
+        if (epoch + 1) % train_cfg['EVAL_INTERVAL'] == 0 and epoch != 0:
+            results = evaluate(model, valloader, device, loss_fn)
+            acc, macc, test_loss, miou = results[0], results[1], results[-2], results[-1]
+            writer.add_scalar('Loss/test', test_loss, epoch)
+            writer.add_scalar('mIoU/test', miou, epoch)
 
+            checkpoint = {
+                'loss': train_loss,
+                'epoch': epoch,
+                'model': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'scheduler': scheduler.state_dict()}
+            torch.save(checkpoint, save_dir / f"{model_cfg['NAME']}_{model_cfg['BACKBONE']}_{dataset_cfg['NAME']}.pth")
             if miou > best_mIoU:
                 best_mIoU = miou
-                torch.save(model.module.state_dict() if train_cfg['DDP'] else model.state_dict(),
-                           save_dir / f"{model_cfg['NAME']}_{model_cfg['BACKBONE']}_{dataset_cfg['NAME']}.pth")
             print(f"Current mIoU: {miou} Best mIoU: {best_mIoU}")
             print(f"Current accuracy: {acc}")
             print(f"Current maccuracy: {macc}")
+            print(f"Current maccuracy: {macc}")
+            print("")
+            results = evaluate(model, trainloader, device, loss_fn)
+            acc, macc, miou = results[0], results[1], results[-1]
+            writer.add_scalar('mIoU/train', miou, epoch)
+            print("Evaluating on train")
+            print(f"Current mIoU: {miou}")
+            print(f"Current accuracy: {acc}")
+            print(f"Current maccuracy: {macc}")
+            print(f"Current maccuracy: {macc}")
+            print("")
+            print("="*20)
+            print("")
 
     writer.close()
     pbar.close()
@@ -122,7 +166,7 @@ def main(cfg, gpu, save_dir):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--cfg', type=str, default='configs/camvid.yaml', help='Configuration file to use')
+    parser.add_argument('--cfg', type=str, default='configs/ai4mars.yaml', help='Configuration file to use')
     args = parser.parse_args()
 
     with open(args.cfg) as f:
